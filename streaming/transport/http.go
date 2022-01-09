@@ -20,6 +20,7 @@ type HTTP struct {
 func NewHTTP(svc streaming.Service, r *mux.Router) {
 	h := HTTP{svc}
 
+	r.HandleFunc("/health", h.getHealth).Methods("GET")
 	r.HandleFunc("/room", h.handleCreateRoom).Methods("GET")
 	r.HandleFunc("/room/{roomID}/playlist", h.handleGetRoomPlaylist).Methods("GET")
 }
@@ -45,6 +46,10 @@ func (h *HTTP) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	responses.JSON(w, http.StatusOK, rd)
+}
+
+func (h *HTTP) getHealth(w http.ResponseWriter, r *http.Request) {
+	responses.JSON(w, http.StatusOK, "ok")
 }
 
 func (h *HTTP) handleGetRoomPlaylist(w http.ResponseWriter, r *http.Request) {
