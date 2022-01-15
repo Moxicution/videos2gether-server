@@ -1,8 +1,8 @@
 package api
 
 import (
-	"log"
 	"streamserver/httpserver"
+	"streamserver/log"
 	"streamserver/streaming"
 	"streamserver/streaming/hub"
 	streamingTransport "streamserver/streaming/transport"
@@ -14,7 +14,7 @@ func Run() {
 
 	s, err := httpserver.New()
 	if err != nil {
-		log.Fatal(err.Error())
+		log.Logger.Fatal(err.Error())
 	}
 
 	streamingTransport.NewHTTP(streaming.Initialize(), s.Router)

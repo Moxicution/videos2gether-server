@@ -2,10 +2,12 @@ package hub
 
 import (
 	"encoding/json"
-	"log"
 	"time"
 
+	"streamserver/log"
+
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -25,6 +27,7 @@ const (
 	PAUSE_VIDEO actionType = "PAUSE_VIDEO"
 	END_VIDEO   actionType = "END_VIDEO"
 	SYNC        actionType = "SYNC"
+	HEARTH_BEAT actionType = "HEARTH_BEAT"
 )
 
 type Message struct {
@@ -59,6 +62,10 @@ type VideoData struct {
 func (s Subscription) Read() {
 	c := s.Conn
 
+	logger := log.Logger.WithFields(logrus.Fields{
+		"room": s.Room,
+	})
+
 	defer func() {
 		Instance.Unregister <- s
 		c.Conn.Close()
@@ -72,14 +79,12 @@ func (s Subscription) Read() {
 		_, msg, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway) {
-				log.Printf("error: %v", err)
+				logger.Fatalf("error: %v", err)
 			}
 			break
 		}
 
 		action, data := unmarshalSocketMessage(msg)
-
-		log.Println(data)
 
 		itemsInPlaylist := len(Instance.RoomsPlaylist[s.Room]) > 0
 
@@ -92,11 +97,9 @@ func (s Subscription) Read() {
 				Url:     data.Url,
 			})
 
-			log.Println("ARR: ", Instance.RoomsPlaylist[s.Room])
-
-			res := RequestSocketMessage{
-				Action: "REQUEST",
-				Data:   Instance.RoomsPlaylist[s.Room],
+			res := SocketMessage{
+				Action: "END_VIDEO",
+				Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
 			}
 
 			jsData, _ := json.Marshal(res)
@@ -107,46 +110,47 @@ func (s Subscription) Read() {
 		case END_VIDEO:
 			if len(Instance.RoomsPlaylist[s.Room]) > 0 {
 				Instance.RoomsPlaylist[s.Room] = Instance.RoomsPlaylist[s.Room].Unqueue()
-				log.Println("NEW ARR: ", Instance.RoomsPlaylist[s.Room])
 
-				if len(Instance.RoomsPlaylist[s.Room]) > 0 {
-					//TODO: Abstract this method
-					res := SocketMessage{
-						Action: "PLAY_VIDEO",
-						Data:   Instance.RoomsPlaylist[s.Room].GetNext(),
-					}
-
-					jsData, _ := json.Marshal(res)
-
-					m := Message{jsData, s.Room}
-					Instance.Broadcast <- m
-
-				}
-
-				//TODO: Abstract this method
 				res := SocketMessage{
-					Action: "PLAY_VIDEO",
-					Data:   Instance.RoomsPlaylist[s.Room].GetNext(),
+					Action: "END_VIDEO",
+					Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
 				}
 
 				jsData, _ := json.Marshal(res)
-
 				m := Message{jsData, s.Room}
 				Instance.Broadcast <- m
-
 			}
 		case PLAY_VIDEO:
 			if itemsInPlaylist {
 				Instance.RoomsPlaylist[s.Room].UpdateCurrent(
 					VideoData{
 						Time:    data.Time,
-						Url:     Instance.RoomsPlaylist[s.Room].GetNext().Url,
+						Url:     Instance.RoomsPlaylist[s.Room].GetCurrent().Url,
 						Playing: true,
 					})
 
 				res := SocketMessage{
 					Action: "PLAY_VIDEO",
-					Data:   Instance.RoomsPlaylist[s.Room].GetNext(),
+					Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
+				}
+
+				jsData, _ := json.Marshal(res)
+
+				m := Message{jsData, s.Room}
+				Instance.Broadcast <- m
+			}
+		case HEARTH_BEAT:
+			if itemsInPlaylist {
+				Instance.RoomsPlaylist[s.Room].UpdateCurrent(
+					VideoData{
+						Time:    data.Time,
+						Url:     Instance.RoomsPlaylist[s.Room].GetCurrent().Url,
+						Playing: true,
+					})
+
+				res := SocketMessage{
+					Action: "HEARTH_BEAT",
+					Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
 				}
 
 				jsData, _ := json.Marshal(res)
@@ -159,13 +163,13 @@ func (s Subscription) Read() {
 				Instance.RoomsPlaylist[s.Room].UpdateCurrent(
 					VideoData{
 						Time:    data.Time,
-						Url:     Instance.RoomsPlaylist[s.Room].GetNext().Url,
+						Url:     Instance.RoomsPlaylist[s.Room].GetCurrent().Url,
 						Playing: false,
 					})
 
 				res := SocketMessage{
 					Action: "PAUSE_VIDEO",
-					Data:   Instance.RoomsPlaylist[s.Room].GetNext(),
+					Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
 				}
 
 				jsData, _ := json.Marshal(res)
@@ -174,15 +178,28 @@ func (s Subscription) Read() {
 				Instance.Broadcast <- m
 			}
 		case SYNC:
-			s.SyncToRoom()
+			res := SocketMessage{
+				Action: "SYNC",
+				Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
+			}
 
+			jsData, _ := json.Marshal(res)
+
+			m := Message{jsData, s.Room}
+			Instance.Broadcast <- m
 		default:
-			log.Printf("No valid action sent from Client, ACTION: %v \n", action)
+			logger.Printf("No valid action sent from Client, ACTION: %v \n", action)
 		}
 
 		if itemsInPlaylist {
-			log.Printf("CURRENTLY PLAYING %s \n", Instance.RoomsPlaylist[s.Room].GetNext().Url)
+			logger.Printf("Currently playing %s for room: \n", Instance.RoomsPlaylist[s.Room].GetCurrent().Url)
 		}
+
+		logger.WithFields(logrus.Fields{
+			"action":        action,
+			"data":          data,
+			"curr_playlist": Instance.RoomsPlaylist[s.Room],
+		}).Info("[ROOM]")
 
 		// m := Message{msg, s.Room}
 		//Instance.Broadcast <- m
@@ -194,20 +211,20 @@ func unmarshalSocketMessage(msg []byte) (actionType, VideoData) {
 	var objmap map[string]json.RawMessage
 	err := json.Unmarshal(msg, &objmap)
 	if err != nil {
-		log.Fatalln(err.Error())
+		log.Logger.Fatal(err.Error())
 	}
 
 	var action actionType
 	err = json.Unmarshal(objmap["action"], &action)
 	if err != nil {
-		log.Fatal(err)
+		log.Logger.Fatal(err)
 	}
 
 	var data VideoData
 	if objmap["data"] != nil {
 		err = json.Unmarshal(objmap["data"], &data)
 		if err != nil {
-			log.Fatal(err)
+			log.Logger.Fatal(err)
 		}
 	}
 
@@ -244,16 +261,10 @@ func (s Subscription) Write() {
 
 // SyncToRoom sends current media playing data to connection
 func (s Subscription) SyncToRoom() {
-	if len(Instance.RoomsPlaylist[s.Room]) > 0 {
-
-		msg := SocketMessage{
-			Action: "SYNC",
-			Data:   Instance.RoomsPlaylist[s.Room].GetNext(),
-		}
-
-		log.Printf("Syncing... MSG: %v", msg)
-
-		s.Conn.Conn.WriteJSON(msg)
-
+	msg := SocketMessage{
+		Action: "SYNC",
+		Data:   Instance.RoomsPlaylist[s.Room].GetCurrent(),
 	}
+
+	s.Conn.Conn.WriteJSON(msg)
 }
